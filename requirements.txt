@@ -1,0 +1,5 @@
+torch
+torch-geometric
+neo4j
+fastapi
+uvicorn
