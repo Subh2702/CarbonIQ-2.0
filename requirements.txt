@@ -1,5 +1,4 @@
-torch
-torch-geometric
-neo4j
+pandas
+numpy
 fastapi
-uvicorn
+wandb

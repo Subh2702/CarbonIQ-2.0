@@ -1,6 +1,6 @@
 class GNNConfig:
     # Model Architecture
-    INPUT_DIM = 15              # Supplier features
+    INPUT_DIM = 11              # Supplier features
     HIDDEN_DIM = 128            # Hidden layer size
     OUTPUT_DIM = 64             # Node embedding size
     NUM_LAYERS = 3              # GNN layers
