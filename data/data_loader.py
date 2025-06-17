@@ -1,106 +1,155 @@
-import pandas as pd
-import numpy as np
 import torch
+import numpy as np
+from torch_geometric.utils import dropout_adj, add_random_edge
 from torch_geometric.data import Data
-from torch_geometric.loader import DataLoader as GeoDataLoader
+import pandas as pd
 
-class DataLoader:
+class GraphDataAugmentation:
     def __init__(self, config):
-        """
-        Initialize the DataLoader with a configuration dictionary.
-        
-        Args:
-            config (dict): Configuration settings for database connections.
-        """
         self.config = config
-        # Simulate database connection initialization
-        pass
+        self.node_noise_std = config.NODE_FEATURE_NOISE
+        self.edge_dropout_rate = config.EDGE_DROPOUT_RATE
     
-    def load_from_databases(self):
-        """
-        Simulate fetching data from Neo4j, InfluxDB, PostgreSQL, and Redis.
-        Returns dummy supplier and relationship DataFrames.
+    def augment_graph_data(self, data, training=True):
+        """Apply data augmentation to graph data"""
+        if not training:
+            return data
         
-        Returns:
-            tuple: (suppliers_df, relationships_df)
-        """
-        # Simulate Neo4j (graph data), InfluxDB (time-series), PostgreSQL (historical), Redis (cached)
-        num_suppliers = 100
-        suppliers_df = pd.DataFrame({
-            'supplier_id': [f'SUP_{i:03d}' for i in range(num_suppliers)],
-            'carbon_intensity': np.random.rand(num_suppliers),  # InfluxDB real-time metrics
-            'location': np.random.choice(['Mumbai', 'Delhi', 'Bangalore'], num_suppliers),
-            'category': np.random.choice(['Electronics', 'Textiles', 'Automotive', 'Chemical'], num_suppliers),
-            'performance_score': np.random.rand(num_suppliers),  # PostgreSQL historical data
-            'renewable_percentage': np.random.rand(num_suppliers),  # PostgreSQL historical data
-            'production_volume': np.random.rand(num_suppliers),  # Redis cached data
-            'cost_efficiency': np.random.rand(num_suppliers),  # Redis cached data
-        })
+        # Create augmented copy
+        augmented_data = data.clone()
         
-        num_relationships = 200
-        relationships_df = pd.DataFrame({
-            'supplier_from_id': np.random.choice(suppliers_df['supplier_id'], num_relationships),  # Neo4j
-            'supplier_to_id': np.random.choice(suppliers_df['supplier_id'], num_relationships),    # Neo4j
-            'carbon_flow': np.random.rand(num_relationships),  # InfluxDB time-series
-            'volume': np.random.rand(num_relationships),  # PostgreSQL historical
-            'transportation_emissions': np.random.rand(num_relationships),  # Redis cached
-        })
+        # 1. Add noise to node features
+        augmented_data.x = self._add_node_noise(augmented_data.x)
+        
+        # 2. Random edge dropout
+        augmented_data.edge_index, augmented_data.edge_attr = self._edge_dropout(
+            augmented_data.edge_index, augmented_data.edge_attr
+        )
+        
+        # 3. Feature masking (randomly mask some features)
+        augmented_data.x = self._feature_masking(augmented_data.x)
+        
+        return augmented_data
+    
+    def _add_node_noise(self, node_features):
+        """Add Gaussian noise to node features"""
+        noise = torch.randn_like(node_features) * self.node_noise_std
+        return node_features + noise
+    
+    def _edge_dropout(self, edge_index, edge_attr):
+        """Randomly drop edges"""
+        edge_index, edge_attr = dropout_adj(
+            edge_index, edge_attr, 
+            p=self.edge_dropout_rate,
+            training=True
+        )
+        return edge_index, edge_attr
+    
+    def _feature_masking(self, node_features, mask_prob=0.1):
+        """Randomly mask some node features"""
+        mask = torch.rand_like(node_features) < mask_prob
+        masked_features = node_features.clone()
+        masked_features[mask] = 0
+        return masked_features
+    
+    def create_multiple_views(self, data):
+        """Create multiple augmented views for contrastive learning"""
+        view1 = self.augment_graph_data(data, training=True)
+        view2 = self.augment_graph_data(data, training=True)
+        return view1, view2
+
+class ImprovedDataLoader:
+    def __init__(self, config):
+        self.config = config
+        self.augmentation = GraphDataAugmentation(config)
+    
+    def load_enhanced_data(self):
+        """Load data with better feature engineering"""
+        # Original data loading
+        suppliers_df, relationships_df = self._load_from_databases()
+        
+        # Enhanced feature engineering
+        suppliers_df = self._enhance_supplier_features(suppliers_df)
+        relationships_df = self._enhance_relationship_features(relationships_df)
         
         return suppliers_df, relationships_df
     
-    def create_loaders(self, graph_data):
-        """
-        Create training and validation DataLoaders from the graph data with masks.
+    def _load_from_databases(self):
+        """Enhanced data loading with better distributions"""
+        num_suppliers = 500  # More suppliers for better training
         
-        Args:
-            graph_data (Data): PyTorch Geometric Data object containing graph structure.
+        # Better feature distributions
+        suppliers_df = pd.DataFrame({
+            'supplier_id': [f'SUP_{i:03d}' for i in range(num_suppliers)],
+            'carbon_intensity': np.random.beta(2, 5, num_suppliers),  # More realistic distribution
+            'location': np.random.choice(['Mumbai', 'Delhi', 'Bangalore'], num_suppliers, p=[0.4, 0.3, 0.3]),
+            'category': np.random.choice(['Electronics', 'Textiles', 'Automotive', 'Chemical'], 
+                                       num_suppliers, p=[0.3, 0.25, 0.25, 0.2]),
+            'performance_score': np.random.beta(3, 2, num_suppliers),  # Higher performance bias
+            'renewable_percentage': np.random.beta(2, 3, num_suppliers),
+            'production_volume': np.random.lognormal(0, 1, num_suppliers),  # Log-normal for volume
+            'cost_efficiency': np.random.beta(2, 2, num_suppliers),
+        })
         
-        Returns:
-            tuple: (train_loader, val_loader)
-        """
-        num_nodes = graph_data.x.size(0)
-        num_edges = graph_data.edge_index.size(1)
+        # More realistic relationships
+        num_relationships = 1500  # More edges for better connectivity
+        relationships_df = pd.DataFrame({
+            'supplier_from_id': np.random.choice(suppliers_df['supplier_id'], num_relationships),
+            'supplier_to_id': np.random.choice(suppliers_df['supplier_id'], num_relationships),
+            'carbon_flow': np.random.beta(2, 5, num_relationships),
+            'volume': np.random.lognormal(0, 1, num_relationships),
+            'transportation_emissions': np.random.gamma(2, 0.5, num_relationships),
+        })
         
-        # Split nodes into training and validation sets (80-20 split)
-        train_node_mask = torch.zeros(num_nodes, dtype=torch.bool)
-        val_node_mask = torch.zeros(num_nodes, dtype=torch.bool)
-        train_node_indices = np.random.choice(num_nodes, int(0.8 * num_nodes), replace=False)
-        val_node_indices = np.setdiff1d(np.arange(num_nodes), train_node_indices)
-        train_node_mask[train_node_indices] = True
-        val_node_mask[val_node_indices] = True
+        # Remove self-loops
+        relationships_df = relationships_df[
+            relationships_df['supplier_from_id'] != relationships_df['supplier_to_id']
+        ]
         
-        # Split edges into training and validation sets (80-20 split)
-        train_edge_mask = torch.zeros(num_edges, dtype=torch.bool)
-        val_edge_mask = torch.zeros(num_edges, dtype=torch.bool)
-        train_edge_indices = np.random.choice(num_edges, int(0.8 * num_edges), replace=False)
-        val_edge_indices = np.setdiff1d(np.arange(num_edges), train_edge_indices)
-        train_edge_mask[train_edge_indices] = True
-        val_edge_mask[val_edge_indices] = True
-        
-        # Create training Data object with training masks
-        train_data = Data(
-            x=graph_data.x,
-            edge_index=graph_data.edge_index,
-            edge_attr=graph_data.edge_attr,
-            supplier_labels=graph_data.supplier_labels,
-            carbon_flow_targets=graph_data.carbon_flow_targets,
-            train_mask=train_node_mask,
-            train_edge_mask=train_edge_mask
+        return suppliers_df, relationships_df
+    
+    def _enhance_supplier_features(self, suppliers_df):
+        """Add derived features"""
+        # Carbon efficiency score
+        suppliers_df['carbon_efficiency'] = (
+            suppliers_df['performance_score'] / (suppliers_df['carbon_intensity'] + 0.1)
         )
         
-        # Create validation Data object with validation masks
-        val_data = Data(
-            x=graph_data.x,
-            edge_index=graph_data.edge_index,
-            edge_attr=graph_data.edge_attr,
-            supplier_labels=graph_data.supplier_labels,
-            carbon_flow_targets=graph_data.carbon_flow_targets,
-            val_mask=val_node_mask,
-            val_edge_mask=val_edge_mask
+        # Sustainability score
+        suppliers_df['sustainability_score'] = (
+            0.4 * suppliers_df['renewable_percentage'] + 
+            0.3 * (1 - suppliers_df['carbon_intensity']) +
+            0.3 * suppliers_df['performance_score']
         )
         
-        # Create DataLoaders, each yielding the entire graph as a single batch
-        train_loader = GeoDataLoader([train_data], batch_size=1)
-        val_loader = GeoDataLoader([val_data], batch_size=1)
+        # Geographic clustering
+        location_coords = {
+            'Mumbai': [19.0760, 72.8777],
+            'Delhi': [28.7041, 77.1025], 
+            'Bangalore': [12.9716, 77.5946]
+        }
+        suppliers_df['latitude'] = suppliers_df['location'].map(lambda x: location_coords[x][0])
+        suppliers_df['longitude'] = suppliers_df['location'].map(lambda x: location_coords[x][1])
         
-        return train_loader, val_loader
+        return suppliers_df
+    
+    def _enhance_relationship_features(self, relationships_df):
+        """Add derived relationship features"""
+        # Transport efficiency
+        relationships_df['transport_efficiency'] = (
+            relationships_df['volume'] / (relationships_df['transportation_emissions'] + 0.1)
+        )
+        
+        # Carbon per unit volume
+        relationships_df['carbon_per_volume'] = (
+            relationships_df['carbon_flow'] / (relationships_df['volume'] + 0.1)
+        )
+        
+        return relationships_df
+
+# Usage in your main training script
+def get_enhanced_data_pipeline():
+    """Get complete enhanced data pipeline"""
+    config = EnhancedGNNConfig()
+    data_loader = ImprovedDataLoader(config)
+    return data_loader, config

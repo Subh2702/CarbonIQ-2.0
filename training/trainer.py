@@ -3,134 +3,245 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch_geometric.loader import DataLoader
 import wandb
+import numpy as np
+from sklearn.utils.class_weight import compute_class_weight
 
-class GNNTrainer:
+class EnhancedGNNTrainer:
     def __init__(self, model, config, device='cuda'):
         self.model = model.to(device)
         self.config = config
         self.device = device
         
-        # Optimizer
-        self.optimizer = optim.Adam(
+        # Advanced optimizer with better hyperparameters
+        self.optimizer = optim.AdamW(
             self.model.parameters(), 
             lr=config.LEARNING_RATE,
-            weight_decay=1e-5
+            weight_decay=1e-4,  # Increased weight decay
+            betas=(0.9, 0.999),
+            eps=1e-8
         )
         
-        # Learning rate scheduler
-        self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', patience=10, factor=0.5, min_lr=1e-6
+        # Cosine annealing with warm restarts
+        self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            self.optimizer, 
+            T_0=20,  # Initial restart period
+            T_mult=2,  # Period multiplier
+            eta_min=1e-6
         )
         
+        # For class balancing
+        self.class_weights = None
+        
+        # Early stopping
+        self.best_val_loss = float('inf')
+        self.patience = 15
+        self.patience_counter = 0
+        
+        # Gradient accumulation
+        self.accumulation_steps = 4
+        
+    def compute_class_weights(self, train_loader):
+        """Compute class weights for balanced training"""
+        all_labels = []
+        for batch in train_loader:
+            if hasattr(batch, 'supplier_labels'):
+                all_labels.extend(batch.supplier_labels.cpu().numpy())
+        
+        if len(all_labels) > 0:
+            unique_classes = np.unique(all_labels)
+            weights = compute_class_weight('balanced', classes=unique_classes, y=all_labels)
+            self.class_weights = torch.FloatTensor(weights).to(self.device)
+    
     def train_epoch(self, train_loader):
-        """Ek epoch ka training"""
+        """Enhanced training with gradient accumulation and auxiliary tasks"""
         self.model.train()
         total_loss = 0
         total_accuracy = 0
+        num_batches = 0
         
         for batch_idx, batch in enumerate(train_loader):
             batch = batch.to(self.device)
             
             # Forward pass
-            self.optimizer.zero_grad()
-            outputs = self.model(batch.x, batch.edge_index)
+            outputs = self.model(batch.x, batch.edge_index, 
+                               edge_attr=getattr(batch, 'edge_attr', None))
             
-            # Loss and accuracy calculation
-            loss, accuracy = self._calculate_loss(outputs, batch, is_training=True)
+            # Enhanced loss calculation
+            loss, metrics = self._calculate_enhanced_loss(outputs, batch, is_training=True)
+            
+            # Normalize loss for gradient accumulation
+            loss = loss / self.accumulation_steps
             
             # Backward pass
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            self.optimizer.step()
             
-            total_loss += loss.item()
-            total_accuracy += accuracy
+            # Gradient accumulation
+            if (batch_idx + 1) % self.accumulation_steps == 0:
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+            
+            total_loss += loss.item() * self.accumulation_steps
+            total_accuracy += metrics['accuracy']
+            num_batches += 1
             
             # Logging
             if batch_idx % 10 == 0:
-                print(f'Batch {batch_idx}, Loss: {loss.item():.4f}, Accuracy: {accuracy:.4f}')
+                print(f'Batch {batch_idx}, Loss: {loss.item() * self.accumulation_steps:.4f}, '
+                      f'Accuracy: {metrics["accuracy"]:.4f}')
         
-        return total_loss / len(train_loader), total_accuracy / len(train_loader)
+        return total_loss / num_batches, total_accuracy / num_batches
     
-    def _calculate_loss(self, outputs, batch, is_training=True):
-        """Multi-task loss function"""
-        # Select appropriate masks
+    def _calculate_enhanced_loss(self, outputs, batch, is_training=True):
+        """Multi-task loss with auxiliary tasks and class balancing"""
+        device = self.device
+        
+        # Masks for training/validation
         node_mask = batch.train_mask if is_training and hasattr(batch, 'train_mask') else \
                     batch.val_mask if not is_training and hasattr(batch, 'val_mask') else \
-                    torch.ones(batch.x.size(0), dtype=torch.bool, device=self.device)
+                    torch.ones(batch.x.size(0), dtype=torch.bool, device=device)
+        
         edge_mask = batch.train_edge_mask if is_training and hasattr(batch, 'train_edge_mask') else \
                     batch.val_edge_mask if not is_training and hasattr(batch, 'val_edge_mask') else \
-                    torch.ones(batch.edge_index.size(1), dtype=torch.bool, device=self.device)
+                    torch.ones(batch.edge_index.size(1), dtype=torch.bool, device=device)
         
-        # Carbon flow prediction loss (MSE)
-        flow_loss = torch.tensor(0.0, device=self.device)
-        if 'carbon_flows' in outputs and 'carbon_flow_targets' in batch:
+        total_loss = torch.tensor(0.0, device=device)
+        metrics = {'accuracy': 0.0, 'flow_mse': 0.0}
+        
+        # 1. Carbon flow prediction loss (Huber loss for robustness)
+        if 'carbon_flows' in outputs and hasattr(batch, 'carbon_flow_targets'):
             flow_pred = outputs['carbon_flows'][edge_mask].squeeze()
             flow_target = batch.carbon_flow_targets[edge_mask]
             if flow_pred.numel() > 0:
-                flow_loss = F.mse_loss(flow_pred, flow_target)
+                flow_loss = F.smooth_l1_loss(flow_pred, flow_target)  # Huber loss
+                total_loss += 0.4 * flow_loss
+                metrics['flow_mse'] = F.mse_loss(flow_pred, flow_target).item()
         
-        # Supplier classification loss (CrossEntropy)
-        class_loss = torch.tensor(0.0, device=self.device)
-        accuracy = 0.0
-        if 'supplier_classes' in outputs and 'supplier_labels' in batch:
+        # 2. Supplier classification loss with class weights
+        if 'supplier_classes' in outputs and hasattr(batch, 'supplier_labels'):
             class_pred = outputs['supplier_classes'][node_mask]
             class_target = batch.supplier_labels[node_mask]
             if class_pred.numel() > 0:
-                class_loss = F.cross_entropy(class_pred, class_target)
+                class_loss = F.cross_entropy(class_pred, class_target, weight=self.class_weights)
+                total_loss += 0.3 * class_loss
+                
+                # Calculate accuracy
                 preds = class_pred.argmax(dim=1)
-                accuracy = (preds == class_target).float().mean().item()
+                metrics['accuracy'] = (preds == class_target).float().mean().item()
         
-        # Graph structure preservation loss
-        structure_loss = self._graph_contrastive_loss(outputs['node_embeddings'], batch)
+        # 3. Location prediction (auxiliary task)
+        if 'location_pred' in outputs and hasattr(batch, 'x'):
+            # Extract location from features (assuming positions 2,3 are lat,lon)
+            location_features = batch.x[node_mask, 2:4]  # lat, lon
+            location_target = self._extract_location_labels(location_features)
+            if location_target is not None:
+                location_pred = outputs['location_pred'][node_mask]
+                location_loss = F.cross_entropy(location_pred, location_target)
+                total_loss += 0.1 * location_loss
         
-        # Total weighted loss
-        total_loss = 0.5 * flow_loss + 0.3 * class_loss + 0.2 * structure_loss
+        # 4. Performance prediction (auxiliary task)
+        if 'performance_pred' in outputs and hasattr(batch, 'x'):
+            # Extract performance score (assuming position 1)
+            perf_target = batch.x[node_mask, 1]  # performance_score
+            perf_pred = outputs['performance_pred'][node_mask].squeeze()
+            if perf_pred.numel() > 0:
+                perf_loss = F.mse_loss(perf_pred, perf_target)
+                total_loss += 0.1 * perf_loss
         
-        return total_loss, accuracy
+        # 5. Graph structure preservation (contrastive learning)
+        if 'node_embeddings' in outputs:
+            contrastive_loss = self._enhanced_contrastive_loss(
+                outputs['node_embeddings'], batch, node_mask
+            )
+            total_loss += 0.1 * contrastive_loss
+        
+        return total_loss, metrics
     
-    def _graph_contrastive_loss(self, embeddings, batch):
-        """Contrastive loss for similar suppliers"""
+    def _extract_location_labels(self, location_features):
+        """Convert lat,lon to location labels"""
+        # Mumbai: [19.0760, 72.8777], Delhi: [28.7041, 77.1025], Bangalore: [12.9716, 77.5946]
+        mumbai = torch.tensor([19.0760, 72.8777], device=self.device)
+        delhi = torch.tensor([28.7041, 77.1025], device=self.device)
+        bangalore = torch.tensor([12.9716, 77.5946], device=self.device)
+        
+        locations = torch.stack([mumbai, delhi, bangalore])
+        
+        # Find closest location for each node
+        distances = torch.cdist(location_features, locations)
+        location_labels = distances.argmin(dim=1)
+        
+        return location_labels
+    
+    def _enhanced_contrastive_loss(self, embeddings, batch, node_mask):
+        """Enhanced contrastive loss with hard negative mining"""
         if not hasattr(batch, 'supplier_labels'):
             return torch.tensor(0.0, device=self.device)
-        embeddings = F.normalize(embeddings, p=2, dim=1)
+        
+        # Normalize embeddings
+        embeddings = F.normalize(embeddings[node_mask], p=2, dim=1)
         similarity_matrix = torch.matmul(embeddings, embeddings.T)
-        temperature = 0.5
-        num_nodes = embeddings.size(0)
         
-        labels = batch.supplier_labels
+        labels = batch.supplier_labels[node_mask]
+        batch_size = embeddings.size(0)
+        
+        # Create positive and negative masks
         pos_mask = (labels.unsqueeze(0) == labels.unsqueeze(1)).float()
-        pos_mask.fill_diagonal_(0)  # Exclude self
-        neg_mask = 1 - pos_mask - torch.eye(num_nodes, device=self.device)
+        pos_mask.fill_diagonal_(0)  # Remove self-similarities
+        neg_mask = 1 - pos_mask - torch.eye(batch_size, device=self.device)
         
-        pos_sim = torch.exp(similarity_matrix / temperature) * pos_mask
-        neg_sim = torch.exp(similarity_matrix / temperature) * neg_mask
-        pos_sum = pos_sim.sum(dim=1)
-        neg_sum = neg_sim.sum(dim=1)
+        # Temperature scaling
+        temperature = 0.1
+        similarity_matrix = similarity_matrix / temperature
         
-        loss = -torch.log(pos_sum / (pos_sum + neg_sum + 1e-6)).mean()
-        return loss
+        # Hard negative mining: select hardest negatives
+        neg_similarities = similarity_matrix * neg_mask
+        hard_negatives, _ = neg_similarities.topk(k=min(5, neg_mask.sum(dim=1).max().int()), dim=1)
+        
+        # InfoNCE loss
+        pos_similarities = similarity_matrix * pos_mask
+        pos_exp = torch.exp(pos_similarities).sum(dim=1)
+        neg_exp = torch.exp(hard_negatives).sum(dim=1)
+        
+        loss = -torch.log(pos_exp / (pos_exp + neg_exp + 1e-8))
+        return loss.mean()
     
     def validate(self, val_loader):
-        """Validation loop"""
+        """Enhanced validation with more metrics"""
         self.model.eval()
         total_loss = 0
-        total_accuracy = 0
+        all_metrics = {'accuracy': 0.0, 'flow_mse': 0.0}
         
         with torch.no_grad():
             for batch in val_loader:
                 batch = batch.to(self.device)
-                outputs = self.model(batch.x, batch.edge_index)
-                loss, accuracy = self._calculate_loss(outputs, batch, is_training=False)
+                outputs = self.model(batch.x, batch.edge_index,
+                                   edge_attr=getattr(batch, 'edge_attr', None))
+                loss, metrics = self._calculate_enhanced_loss(outputs, batch, is_training=False)
+                
                 total_loss += loss.item()
-                total_accuracy += accuracy
+                for key in all_metrics:
+                    all_metrics[key] += metrics[key]
         
-        return total_loss / len(val_loader), total_accuracy / len(val_loader)
+        num_batches = len(val_loader)
+        avg_loss = total_loss / num_batches
+        for key in all_metrics:
+            all_metrics[key] /= num_batches
+        
+        return avg_loss, all_metrics
     
     def train(self, train_loader, val_loader, epochs):
-        """Complete training pipeline"""
-        wandb.init(project="carbon-gnn", config=self.config.__dict__)
-        best_val_loss = float('inf')
+        """Enhanced training pipeline with early stopping"""
+        # Compute class weights
+        self.compute_class_weights(train_loader)
+        
+        # Initialize wandb
+        wandb.init(project="carbon-gnn-enhanced", config={
+            **self.config.__dict__,
+            'model_type': 'enhanced_gnn',
+            'optimizer': 'AdamW',
+            'scheduler': 'CosineAnnealingWarmRestarts'
+        })
         
         for epoch in range(epochs):
             print(f"\nEpoch {epoch+1}/{epochs}")
@@ -139,10 +250,11 @@ class GNNTrainer:
             train_loss, train_accuracy = self.train_epoch(train_loader)
             
             # Validation
-            val_loss, val_accuracy = self.validate(val_loader)
+            val_loss, val_metrics = self.validate(val_loader)
             
             # Learning rate scheduling
-            self.scheduler.step(val_loss)
+            self.scheduler.step()
+            current_lr = self.optimizer.param_groups[0]['lr']
             
             # Logging
             wandb.log({
@@ -150,16 +262,33 @@ class GNNTrainer:
                 'train_loss': train_loss,
                 'val_loss': val_loss,
                 'train_accuracy': train_accuracy,
-                'val_accuracy': val_accuracy,
-                'lr': self.optimizer.param_groups[0]['lr']
+                'val_accuracy': val_metrics['accuracy'],
+                'val_flow_mse': val_metrics['flow_mse'],
+                'learning_rate': current_lr
             })
             
-            print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Train Acc: {train_accuracy:.4f}, Val Acc: {val_accuracy:.4f}")
+            print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            print(f"Train Acc: {train_accuracy:.4f}, Val Acc: {val_metrics['accuracy']:.4f}")
+            print(f"LR: {current_lr:.6f}")
             
-            # Save best model
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                torch.save(self.model.state_dict(), 'best_gnn_model.pth')
-                print("Model saved!")
+            # Early stopping and model saving
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                self.patience_counter = 0
+                torch.save({
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'epoch': epoch,
+                    'val_loss': val_loss,
+                    'config': self.config
+                }, 'best_enhanced_gnn_model.pth')
+                print("✅ Best model saved!")
+            else:
+                self.patience_counter += 1
+                
+            if self.patience_counter >= self.patience:
+                print(f"Early stopping at epoch {epoch+1}")
+                break
         
         wandb.finish()
+        print(f"Training completed! Best validation loss: {self.best_val_loss:.4f}")
