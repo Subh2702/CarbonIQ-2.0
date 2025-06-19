@@ -8,17 +8,16 @@ class CarbonGraphBuilder:
         self.config = config
         
     def build_supplier_graph(self, suppliers_df, relationships_df):
-        # Map supplier IDs to integer indices (assuming supplier_id is in suppliers_df)
+        #supplier ko map kia index ke sath kuch ansa dikhega {'SUP_001': 0, 'SUP_002': 1, 'SUP_003': 2}
         supplier_id_to_index = {sid: idx for idx, sid in enumerate(suppliers_df['supplier_id'])}
     
-        # Prepare node features (already implemented)
+        #har node ke liye maine feature vector banaya
         node_features = self._prepare_node_features(suppliers_df)
     
-        # Build edges and get carbon flow targets
+        # ye sab ki value rakhi maine build edge fucn ke sath
         edge_index, edge_weights, carbon_flow_targets = self._build_edges(relationships_df, supplier_id_to_index)
     
-        # Prepare supplier_labels by mapping categories to integers
-        category_map = {'Electronics': 0, 'Textiles': 1, 'Automotive': 2, 'Chemical': 3}  # Adjust based on actual categories
+        category_map = {'Electronics': 0, 'Textiles': 1, 'Automotive': 2, 'Chemical': 3}
         supplier_labels = [category_map[supplier['category']] for _, supplier in suppliers_df.iterrows()]
     
         # Create the Data object with all required attributes
@@ -46,8 +45,8 @@ class CarbonGraphBuilder:
         return np.array(features)
     
     def _build_edges(self, relationships_df, supplier_id_to_index):
-        edge_index = [[], []]  # [source_indices, target_indices]
-        edge_weights = []      # Edge features [carbon_flow, volume, transportation_emissions]
+        edge_index = [[], []]  # [source se, target tak]
+        edge_weights = []      # Edge ke features [carbon_flow, volume, transportation_emissions]
         carbon_flow_targets = []  # Target carbon flow values for each edge
     
         for _, relation in relationships_df.iterrows():
@@ -55,7 +54,7 @@ class CarbonGraphBuilder:
             target_idx = supplier_id_to_index[relation['supplier_to_id']]
             carbon_flow = relation['carbon_flow']
         
-            # Apply edge threshold (if present in your config)
+            #hum sirf bade carbon flow wali edge consider karenge
             if carbon_flow > self.config.EDGE_THRESHOLD:
                 edge_index[0].append(source_idx)
                 edge_index[1].append(target_idx)
@@ -68,6 +67,8 @@ class CarbonGraphBuilder:
     
         return edge_index, edge_weights, carbon_flow_targets
     
+    #code for location and category encoding
+
     def _encode_location(self, location):
         location_map = {'Mumbai': [19.0760, 72.8777], 'Delhi': [28.7041, 77.1025], 'Bangalore': [12.9716, 77.5946]}
         return location_map.get(location, [0.0, 0.0])

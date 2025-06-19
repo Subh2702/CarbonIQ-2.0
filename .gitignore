@@ -42,3 +42,5 @@ Thumbs.db
 
 # Project-specific ignores
 best_gnn_model.pth
+
+runs

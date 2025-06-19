@@ -5,7 +5,6 @@ from models.gnn_model import ImprovedCarbonGNN
 from training.trainer import EnhancedGNNTrainer
 import torch
 from torch_geometric.loader import DataLoader as PyGDataLoader
-from sklearn.model_selection import train_test_split
 
 def create_data_loaders(graph_data, config, train_ratio=0.8):
     """Create train/validation data loaders"""
