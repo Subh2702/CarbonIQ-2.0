@@ -107,7 +107,7 @@ def demonstrate_bandit_integration(model, graph_data, config):
     print("-" * 40)
     
     simulation_results = gnn_bandit.simulate_procurement_cycle(
-        graph_data, num_cycles=20, base_demand=1200
+        graph_data, num_cycles=100, base_demand=1200
     )
     
     # Analyze learning progression
