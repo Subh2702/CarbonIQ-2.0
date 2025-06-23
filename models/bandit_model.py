@@ -5,47 +5,30 @@ from collections import defaultdict, deque
 import random
 
 class SupplierBanditAgent:
-    """
-    Multi-Armed Bandit for dynamic supplier selection
-    Integrates with GNN embeddings for context-aware decisions
-    """
     def __init__(self, config, num_suppliers=500):
         self.config = config
         self.num_suppliers = num_suppliers
         
-        # Bandit parameters
         self.epsilon = 0.1  # Exploration rate
         self.alpha = 0.1    # Learning rate
         self.ucb_c = 2.0    # UCB confidence parameter
         
-        # State tracking
-        self.supplier_counts = np.zeros(num_suppliers)  # Selection counts
-        self.supplier_rewards = np.zeros(num_suppliers)  # Average rewards
-        self.supplier_total_rewards = np.zeros(num_suppliers)  # Total rewards
+        # State set karna
+        self.supplier_counts = np.zeros(num_suppliers)  
+        self.supplier_rewards = np.zeros(num_suppliers) 
+        self.supplier_total_rewards = np.zeros(num_suppliers) 
         
-        # Context-aware components
+        # dimentions set karna
         self.context_dim = config.OUTPUT_DIM if hasattr(config, 'OUTPUT_DIM') else 128
         self.context_weights = np.random.normal(0, 0.1, (num_suppliers, self.context_dim))
         
         # Recent performance tracking
         self.recent_performance = defaultdict(lambda: deque(maxlen=10))
         
-        # Strategy selection
-        self.strategy = 'contextual_ucb'  # Options: 'epsilon_greedy', 'ucb', 'contextual_ucb'
+        self.strategy = 'contextual_ucb'
         
     def select_suppliers(self, context_embeddings, current_demand, num_select=5):
-        """
-        Select optimal suppliers based on context and bandit strategy
         
-        Args:
-            context_embeddings: GNN node embeddings [num_suppliers, embedding_dim]
-            current_demand: Current procurement demand
-            num_select: Number of suppliers to select
-        
-        Returns:
-            selected_suppliers: List of supplier indices
-            selection_probs: Selection probabilities for each supplier
-        """
         if self.strategy == 'epsilon_greedy':
             return self._epsilon_greedy_selection(context_embeddings, num_select)
         elif self.strategy == 'ucb':
@@ -56,7 +39,6 @@ class SupplierBanditAgent:
             return self._random_selection(num_select)
     
     def _epsilon_greedy_selection(self, context_embeddings, num_select):
-        """Epsilon-greedy supplier selection"""
         selected_suppliers = []
         selection_probs = np.zeros(self.num_suppliers)
         
@@ -79,7 +61,6 @@ class SupplierBanditAgent:
         return selected_suppliers, selection_probs / selection_probs.sum()
     
     def _ucb_selection(self, context_embeddings, num_select):
-        """Upper Confidence Bound selection"""
         selected_suppliers = []
         selection_probs = np.zeros(self.num_suppliers)
         
@@ -94,7 +75,7 @@ class SupplierBanditAgent:
                     continue
                     
                 if self.supplier_counts[i] == 0:
-                    ucb_values[i] = np.inf  # Select unvisited suppliers first
+                    ucb_values[i] = np.inf
                 else:
                     confidence = self.ucb_c * np.sqrt(np.log(total_selections) / self.supplier_counts[i])
                     ucb_values[i] = self.supplier_rewards[i] + confidence
@@ -106,11 +87,9 @@ class SupplierBanditAgent:
         return selected_suppliers, selection_probs / selection_probs.sum()
     
     def _contextual_ucb_selection(self, context_embeddings, current_demand, num_select):
-        """Context-aware UCB selection using GNN embeddings"""
         selected_suppliers = []
         selection_probs = np.zeros(self.num_suppliers)
         
-        # Convert context embeddings to numpy if needed
         if torch.is_tensor(context_embeddings):
             context_embeddings = context_embeddings.detach().cpu().numpy()
         
@@ -124,13 +103,11 @@ class SupplierBanditAgent:
                     contextual_ucb_values[i] = -np.inf
                     continue
                 
-                # Context-aware reward prediction
                 if len(context_embeddings.shape) > 1 and i < context_embeddings.shape[0]:
                     context_reward = np.dot(self.context_weights[i], context_embeddings[i])
                 else:
                     context_reward = 0
                 
-                # Demand-based adjustment
                 demand_factor = min(1.0, current_demand / 1000.0)  # Normalize demand
                 
                 if self.supplier_counts[i] == 0:
@@ -152,7 +129,6 @@ class SupplierBanditAgent:
         return selected_suppliers, selection_probs / selection_probs.sum()
     
     def _random_selection(self, num_select):
-        """Random baseline selection"""
         selected_suppliers = random.sample(range(self.num_suppliers), num_select)
         selection_probs = np.zeros(self.num_suppliers)
         for supplier in selected_suppliers:
@@ -160,13 +136,6 @@ class SupplierBanditAgent:
         return selected_suppliers, selection_probs
     
     def update_rewards(self, selected_suppliers, rewards):
-        """
-        Update bandit model with observed rewards
-        
-        Args:
-            selected_suppliers: List of supplier indices that were selected
-            rewards: List of rewards (carbon efficiency, cost savings, etc.)
-        """
         for supplier, reward in zip(selected_suppliers, rewards):
             # Update counts
             self.supplier_counts[supplier] += 1
@@ -187,17 +156,7 @@ class SupplierBanditAgent:
                     # Simple gradient update
                     self.context_weights[supplier] += 0.01 * reward * self.last_context[supplier]
     
-    def calculate_supplier_reward(self, supplier_data, gnn_outputs):
-        """
-        Calculate reward for a supplier based on multiple factors
-        
-        Args:
-            supplier_data: Dict with supplier performance metrics
-            gnn_outputs: GNN model outputs including predictions
-        
-        Returns:
-            reward: Scalar reward value (higher is better)
-        """
+    def calculate_supplier_reward(self, supplier_data):
         # Carbon efficiency (primary factor)
         carbon_reward = 1.0 - supplier_data.get('carbon_intensity', 0.5)
         
@@ -228,7 +187,6 @@ class SupplierBanditAgent:
         return np.clip(reward, 0, 1)
     
     def get_supplier_rankings(self):
-        """Get current supplier rankings based on bandit learning"""
         rankings = []
         for i in range(self.num_suppliers):
             avg_reward = self.supplier_rewards[i] if self.supplier_counts[i] > 0 else 0
@@ -239,15 +197,12 @@ class SupplierBanditAgent:
                 'total_reward': self.supplier_total_rewards[i],
                 'recent_performance': list(self.recent_performance[i]) if i in self.recent_performance else []
             })
-        
-        # Sort by average reward
         rankings.sort(key=lambda x: x['avg_reward'], reverse=True)
         return rankings
     
     def adapt_strategy(self, performance_window=50):
-        """Adapt bandit strategy based on recent performance"""
         if np.sum(self.supplier_counts) < performance_window:
-            return  # Not enough data yet
+            return  # data kam hai
         
         # Calculate exploration vs exploitation balance
         recent_selections = np.sum(self.supplier_counts[-performance_window:]) if len(self.supplier_counts) > performance_window else np.sum(self.supplier_counts)
@@ -262,7 +217,6 @@ class SupplierBanditAgent:
             self.epsilon = max(0.05, self.epsilon - 0.05)
     
     def save_state(self, filepath):
-        """Save bandit state for persistence"""
         state = {
             'supplier_counts': self.supplier_counts,
             'supplier_rewards': self.supplier_rewards,
@@ -274,7 +228,6 @@ class SupplierBanditAgent:
         torch.save(state, filepath)
     
     def load_state(self, filepath):
-        """Load bandit state from file"""
         state = torch.load(filepath)
         self.supplier_counts = state['supplier_counts']
         self.supplier_rewards = state['supplier_rewards']
@@ -285,25 +238,11 @@ class SupplierBanditAgent:
 
 
 class GNNBanditIntegration:
-    """
-    Integration layer between GNN and Bandit models
-    """
     def __init__(self, gnn_model, bandit_agent):
         self.gnn_model = gnn_model
         self.bandit_agent = bandit_agent
         
     def dynamic_supplier_selection(self, graph_data, demand_forecast, num_suppliers=5):
-        """
-        End-to-end supplier selection pipeline
-        
-        Args:
-            graph_data: PyTorch Geometric data object
-            demand_forecast: Expected demand volume
-            num_suppliers: Number of suppliers to select
-        
-        Returns:
-            selection_results: Dict with selected suppliers and reasoning
-        """
         # Get GNN embeddings and predictions
         self.gnn_model.eval()
         with torch.no_grad():
@@ -335,7 +274,6 @@ class GNNBanditIntegration:
         return results
     
     def _generate_selection_reasoning(self, selected_suppliers, embeddings, gnn_outputs):
-        """Generate human-readable reasoning for supplier selection"""
         reasoning = []
         
         for supplier_idx in selected_suppliers:
@@ -360,17 +298,6 @@ class GNNBanditIntegration:
         return reasoning
     
     def simulate_procurement_cycle(self, graph_data, num_cycles=10, base_demand=1000):
-        """
-        Simulate multiple procurement cycles to test bandit learning
-        
-        Args:
-            graph_data: Graph data
-            num_cycles: Number of simulation cycles
-            base_demand: Base demand level
-        
-        Returns:
-            simulation_results: Results from each cycle
-        """
         results = []
         
         for cycle in range(num_cycles):
@@ -405,7 +332,6 @@ class GNNBanditIntegration:
         return results
     
     def _simulate_cycle_rewards(self, selected_suppliers):
-        """Simulate realistic rewards for selected suppliers"""
         rewards = []
         for supplier_idx in selected_suppliers:
             # Base reward with some randomness
