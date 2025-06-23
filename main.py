@@ -50,24 +50,35 @@ def add_train_val_masks(graph_data):
     return graph_data
 
 def create_supplier_dataframe(graph_data):
-    """Create supplier DataFrame from graph data for bandit reward calculation"""
+    """Create supplier DataFrame with more realistic reward calculations"""
     num_suppliers = graph_data.x.shape[0]
+    
+    # Extract features with better normalization
+    carbon_intensity = graph_data.x[:, 0].cpu().numpy()
+    performance_score = graph_data.x[:, 1].cpu().numpy()
+    
+    # Normalize features to [0, 1] range
+    carbon_norm = (carbon_intensity - carbon_intensity.min()) / (carbon_intensity.max() - carbon_intensity.min() + 1e-8)
+    performance_norm = (performance_score - performance_score.min()) / (performance_score.max() - performance_score.min() + 1e-8)
     
     suppliers_df = pd.DataFrame({
         'supplier_id': [f'SUP_{i:03d}' for i in range(num_suppliers)],
-        'carbon_intensity': graph_data.x[:, 0].cpu().numpy(),
-        'performance_score': graph_data.x[:, 1].cpu().numpy(),
-        'renewable_percentage': graph_data.x[:, 5].cpu().numpy() if graph_data.x.shape[1] > 5 else np.random.random(num_suppliers),
-        'cost_efficiency': graph_data.x[:, 7].cpu().numpy() if graph_data.x.shape[1] > 7 else np.random.random(num_suppliers),
-        'delivery_reliability': np.random.beta(3, 1, num_suppliers)  # Simulated delivery reliability
+        'carbon_intensity': carbon_intensity,
+        'performance_score': performance_score,
+        'carbon_normalized': carbon_norm,
+        'performance_normalized': performance_norm,
+        'renewable_percentage': graph_data.x[:, 5].cpu().numpy() if graph_data.x.shape[1] > 5 else np.random.beta(2, 2, num_suppliers),
+        'cost_efficiency': graph_data.x[:, 7].cpu().numpy() if graph_data.x.shape[1] > 7 else np.random.beta(3, 2, num_suppliers),
+        'delivery_reliability': np.random.beta(4, 2, num_suppliers),  # Higher reliability on average
+        'quality_score': np.random.beta(3, 2, num_suppliers)
     })
     
     return suppliers_df
 
 def demonstrate_bandit_integration(model, graph_data, config):
-    """Demonstrate the GNN-Bandit integration for dynamic supplier selection"""
+    """Improved bandit demonstration with better initialization and reward calculation"""
     print("\n" + "="*60)
-    print("🚀 DEMONSTRATING GNN-BANDIT INTEGRATION")
+    print("🚀 IMPROVED GNN-BANDIT INTEGRATION")
     print("="*60)
     
     # Initialize bandit agent
@@ -77,8 +88,8 @@ def demonstrate_bandit_integration(model, graph_data, config):
     # Create integration
     gnn_bandit = GNNBanditIntegration(model, bandit_agent)
     
-    # Create supplier data for reward calculation
-    suppliers_df = create_supplier_dataframe(graph_data)
+    # Initialize with GNN priors instead of zeros
+    bandit_agent.initialize_with_gnn_priors(model, graph_data)
     
     print(f"🏭 Initialized bandit for {num_suppliers} suppliers")
     print(f"📊 Bandit strategy: {bandit_agent.strategy}")
@@ -96,17 +107,17 @@ def demonstrate_bandit_integration(model, graph_data, config):
     print(f"🔍 Selected suppliers: {selection_result['selected_suppliers']}")
     print(f"📈 Selection probabilities: {selection_result['selection_probabilities'][selection_result['selected_suppliers']]}")
     
-    # Show detailed reasoning
+    # Show detailed reasoning with actual rewards now
     print("\n💭 SELECTION REASONING:")
     for reason in selection_result['selection_reasoning']:
         print(f"  🏢 {reason['supplier_id']}: Reward={reason['average_reward']:.3f}, "
               f"Count={reason['selection_count']}, Confidence={reason['confidence']}")
     
-    # Simulate procurement cycles
-    print("\n🔄 SIMULATING PROCUREMENT CYCLES")
+    # Run improved simulation
+    print("\n🔄 RUNNING IMPROVED SIMULATION")
     print("-" * 40)
     
-    simulation_results = gnn_bandit.simulate_procurement_cycle(
+    simulation_results = gnn_bandit.improved_simulate_procurement_cycle(
         graph_data, num_cycles=100, base_demand=1200
     )
     
@@ -115,9 +126,17 @@ def demonstrate_bandit_integration(model, graph_data, config):
     print("-" * 40)
     
     cycle_rewards = [result['average_reward'] for result in simulation_results]
+    
     print(f"🎯 Initial average reward: {cycle_rewards[0]:.3f}")
     print(f"🎯 Final average reward: {cycle_rewards[-1]:.3f}")
-    print(f"📈 Improvement: {((cycle_rewards[-1] - cycle_rewards[0]) / cycle_rewards[0] * 100):.1f}%")
+    print(f"📈 Overall improvement: {((cycle_rewards[-1] - cycle_rewards[0]) / cycle_rewards[0] * 100):.1f}%")
+    
+    # Show learning curve over time
+    early_avg = np.mean(cycle_rewards[:20])
+    late_avg = np.mean(cycle_rewards[-20:])
+    print(f"📊 Early cycles avg (1-20): {early_avg:.3f}")
+    print(f"📊 Late cycles avg (81-100): {late_avg:.3f}")
+    print(f"🎓 Learning improvement: {((late_avg - early_avg) / early_avg * 100):.1f}%")
     
     # Show top suppliers after learning
     rankings = bandit_agent.get_supplier_rankings()
@@ -136,18 +155,21 @@ def demonstrate_bandit_integration(model, graph_data, config):
     return gnn_bandit, simulation_results
 
 def real_world_scenario_demo(gnn_bandit, graph_data):
-    """Demonstrate real-world scenario like the laptop supply chain example"""
+    """Demonstrate real-world scenario with improved reward calculation"""
     print("\n" + "="*60)
     print("🌏 REAL-WORLD SCENARIO: LAPTOP SUPPLY CHAIN")
     print("="*60)
     
+    # Create enhanced supplier dataframe
+    suppliers_df = gnn_bandit.create_enhanced_supplier_dataframe(graph_data)
+    
     # Simulate different market conditions
     scenarios = [
-        {"name": "Normal Operations", "demand": 1000, "market_stress": 1.0},
-        {"name": "High Demand Season", "demand": 2000, "market_stress": 1.2},
-        {"name": "Supply Chain Crisis", "demand": 800, "market_stress": 0.7},
-        {"name": "ESG Compliance Push", "demand": 1200, "market_stress": 1.1},
-        {"name": "Cost Optimization", "demand": 1500, "market_stress": 0.9}
+        {"name": "Normal Operations", "demand": 1000, "scenario_type": "normal"},
+        {"name": "High Demand Season", "demand": 2000, "scenario_type": "normal"},
+        {"name": "Supply Chain Crisis", "demand": 800, "scenario_type": "crisis"},
+        {"name": "ESG Compliance Push", "demand": 1200, "scenario_type": "esg_compliance"},
+        {"name": "Cost Optimization", "demand": 1500, "scenario_type": "cost_optimization"}
     ]
     
     print("🎭 Testing different market scenarios:")
@@ -175,14 +197,17 @@ def real_world_scenario_demo(gnn_bandit, graph_data):
         print(f"  🏢 Selected: {[f'SUP_{i:03d}' for i in selection_result['selected_suppliers']]}")
         print(f"  📈 Strategy: {gnn_bandit.bandit_agent.strategy}")
         
-        # Simulate rewards based on scenario
+        # Calculate realistic rewards based on scenario
         rewards = []
         for supplier_idx in selection_result['selected_suppliers']:
-            base_reward = gnn_bandit.bandit_agent.supplier_rewards[supplier_idx]
-            scenario_adjusted = base_reward * scenario['market_stress']
-            rewards.append(scenario_adjusted)
+            supplier_data = suppliers_df.iloc[supplier_idx].to_dict()
+            reward = gnn_bandit.bandit_agent.calculate_supplier_reward(
+                supplier_data, scenario['scenario_type']
+            )
+            rewards.append(reward)
         
         print(f"  🎁 Avg Reward: {np.mean(rewards):.3f}")
+        print(f"  📊 Reward Range: [{min(rewards):.3f}, {max(rewards):.3f}]")
         
         # Update bandit with scenario results
         gnn_bandit.bandit_agent.update_rewards(

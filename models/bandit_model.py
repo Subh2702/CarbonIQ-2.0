@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import pandas as pd
 from collections import defaultdict, deque
 import random
 
@@ -26,6 +27,27 @@ class SupplierBanditAgent:
         self.recent_performance = defaultdict(lambda: deque(maxlen=10))
         
         self.strategy = 'contextual_ucb'
+    
+    def initialize_with_gnn_priors(self, gnn_model, graph_data):
+        """Initialize bandit with GNN-based priors instead of zeros"""
+        gnn_model.eval()
+        with torch.no_grad():
+            outputs = gnn_model(graph_data.x, graph_data.edge_index, 
+                           edge_attr=getattr(graph_data, 'edge_attr', None))
+            
+            # Use performance predictions as initial reward estimates
+            initial_rewards = outputs['performance_pred'].cpu().numpy().flatten()
+            
+            # Normalize to [0.3, 0.8] range to avoid extreme initial values
+            initial_rewards = 0.3 + 0.5 * (initial_rewards - initial_rewards.min()) / (initial_rewards.max() - initial_rewards.min() + 1e-8)
+            
+            # Initialize bandit rewards with GNN predictions
+            self.supplier_rewards = initial_rewards.copy()
+            self.supplier_counts = np.ones(len(initial_rewards))  # Start with 1 to avoid division by zero
+            
+            print(f"🧠 Initialized bandit with GNN priors:")
+            print(f"   Reward range: [{initial_rewards.min():.3f}, {initial_rewards.max():.3f}]")
+            print(f"   Mean reward: {initial_rewards.mean():.3f}")
         
     def select_suppliers(self, context_embeddings, current_demand, num_select=5):
         
@@ -156,35 +178,58 @@ class SupplierBanditAgent:
                     # Simple gradient update
                     self.context_weights[supplier] += 0.01 * reward * self.last_context[supplier]
     
-    def calculate_supplier_reward(self, supplier_data):
-        # Carbon efficiency (primary factor)
-        carbon_reward = 1.0 - supplier_data.get('carbon_intensity', 0.5)
+    def calculate_supplier_reward(self, supplier_data, scenario_type="normal", weights=None):
+        """Calculate more realistic supplier rewards based on multiple factors"""
         
-        # Cost efficiency
-        cost_reward = supplier_data.get('cost_efficiency', 0.5)
+        # Default weights for different scenarios
+        if weights is None:
+            if scenario_type == "esg_compliance":
+                weights = {
+                    'carbon': 0.4,      # High weight on carbon performance
+                    'renewable': 0.3,   # High weight on renewables
+                    'performance': 0.2,
+                    'cost': 0.05,
+                    'delivery': 0.05
+                }
+            elif scenario_type == "cost_optimization":
+                weights = {
+                    'cost': 0.5,        # High weight on cost efficiency
+                    'performance': 0.25,
+                    'delivery': 0.15,
+                    'carbon': 0.05,
+                    'renewable': 0.05
+                }
+            elif scenario_type == "crisis":
+                weights = {
+                    'delivery': 0.4,    # Reliability is key in crisis
+                    'performance': 0.3,
+                    'cost': 0.2,
+                    'carbon': 0.05,
+                    'renewable': 0.05
+                }
+            else:  # normal operations
+                weights = {
+                    'performance': 0.3,
+                    'cost': 0.25,
+                    'carbon': 0.2,
+                    'delivery': 0.15,
+                    'renewable': 0.1
+                }
         
-        # Performance score
-        performance_reward = supplier_data.get('performance_score', 0.5)
-        
-        # Renewable energy usage
-        renewable_reward = supplier_data.get('renewable_percentage', 0.3)
-        
-        # Delivery reliability (can be added from historical data)
-        reliability_reward = supplier_data.get('delivery_reliability', 0.7)
-        
-        # Weighted combination
+        # Calculate weighted reward (higher is better)
         reward = (
-            0.3 * carbon_reward +           # Primary: Carbon efficiency
-            0.2 * cost_reward +             # Cost considerations
-            0.2 * performance_reward +      # Quality/performance
-            0.15 * renewable_reward +       # Sustainability
-            0.15 * reliability_reward       # Reliability
+            weights.get('performance', 0) * supplier_data.get('performance_normalized', 0.5) +
+            weights.get('cost', 0) * supplier_data.get('cost_efficiency', 0.5) +
+            weights.get('carbon', 0) * (1 - supplier_data.get('carbon_normalized', 0.5)) +  # Invert carbon (lower is better)
+            weights.get('delivery', 0) * supplier_data.get('delivery_reliability', 0.5) +
+            weights.get('renewable', 0) * supplier_data.get('renewable_percentage', 0.5)
         )
         
-        # Add noise to encourage exploration
-        reward += np.random.normal(0, 0.01)
+        # Add some noise to make it more realistic
+        noise = np.random.normal(0, 0.05)  # Small amount of noise
+        reward = max(0, min(1, reward + noise))  # Clamp between 0 and 1
         
-        return np.clip(reward, 0, 1)
+        return reward
     
     def get_supplier_rankings(self):
         rankings = []
@@ -296,6 +341,81 @@ class GNNBanditIntegration:
             reasoning.append(reason)
         
         return reasoning
+    
+    def create_enhanced_supplier_dataframe(self, graph_data):
+        """Create supplier DataFrame with more realistic reward calculations"""
+        num_suppliers = graph_data.x.shape[0]
+        
+        # Extract features with better normalization
+        carbon_intensity = graph_data.x[:, 0].cpu().numpy()
+        performance_score = graph_data.x[:, 1].cpu().numpy()
+        
+        # Normalize features to [0, 1] range
+        carbon_norm = (carbon_intensity - carbon_intensity.min()) / (carbon_intensity.max() - carbon_intensity.min() + 1e-8)
+        performance_norm = (performance_score - performance_score.min()) / (performance_score.max() - performance_score.min() + 1e-8)
+        
+        suppliers_df = pd.DataFrame({
+            'supplier_id': [f'SUP_{i:03d}' for i in range(num_suppliers)],
+            'carbon_intensity': carbon_intensity,
+            'performance_score': performance_score,
+            'carbon_normalized': carbon_norm,
+            'performance_normalized': performance_norm,
+            'renewable_percentage': graph_data.x[:, 5].cpu().numpy() if graph_data.x.shape[1] > 5 else np.random.beta(2, 2, num_suppliers),
+            'cost_efficiency': graph_data.x[:, 7].cpu().numpy() if graph_data.x.shape[1] > 7 else np.random.beta(3, 2, num_suppliers),
+            'delivery_reliability': np.random.beta(4, 2, num_suppliers),  # Higher reliability on average
+            'quality_score': np.random.beta(3, 2, num_suppliers)
+        })
+        
+        return suppliers_df
+    
+    def improved_simulate_procurement_cycle(self, graph_data, num_cycles=100, base_demand=1200):
+        """Improved simulation with better reward feedback"""
+        
+        suppliers_df = self.create_enhanced_supplier_dataframe(graph_data)
+        results = []
+        
+        scenario_types = ['normal', 'esg_compliance', 'cost_optimization', 'crisis']
+        
+        for cycle in range(num_cycles):
+            # Vary scenario type and demand
+            scenario_type = scenario_types[cycle % len(scenario_types)]
+            demand_variation = np.random.normal(1.0, 0.2)  # ±20% demand variation
+            current_demand = int(base_demand * demand_variation)
+            
+            # Select suppliers
+            selection_result = self.dynamic_supplier_selection(
+                graph_data, current_demand, num_suppliers=5
+            )
+            
+            # Calculate realistic rewards for selected suppliers
+            cycle_rewards = []
+            for supplier_idx in selection_result['selected_suppliers']:
+                supplier_data = suppliers_df.iloc[supplier_idx].to_dict()
+                reward = self.bandit_agent.calculate_supplier_reward(supplier_data, scenario_type)
+                cycle_rewards.append(reward)
+            
+            # Update bandit with calculated rewards
+            self.bandit_agent.update_rewards(
+                selection_result['selected_suppliers'], 
+                cycle_rewards
+            )
+            
+            # Store results
+            results.append({
+                'cycle': cycle,
+                'scenario_type': scenario_type,
+                'demand': current_demand,
+                'selected_suppliers': selection_result['selected_suppliers'],
+                'rewards': cycle_rewards,
+                'average_reward': np.mean(cycle_rewards)
+            })
+            
+            # Adjust exploration based on learning progress
+            if cycle > 0 and cycle % 20 == 0:
+                # Reduce exploration as we learn more
+                self.bandit_agent.epsilon = max(0.01, self.bandit_agent.epsilon * 0.9)
+        
+        return results
     
     def simulate_procurement_cycle(self, graph_data, num_cycles=10, base_demand=1000):
         results = []
