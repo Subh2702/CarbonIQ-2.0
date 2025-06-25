@@ -4,6 +4,12 @@ import numpy as np
 from collections import defaultdict, deque
 import random
 
+import torch
+import torch.nn as nn
+import numpy as np
+from collections import defaultdict, deque
+import random
+
 class SupplierBanditAgent:
     def __init__(self, config, num_suppliers=500):
         self.config = config
@@ -18,29 +24,48 @@ class SupplierBanditAgent:
         self.supplier_rewards = np.zeros(num_suppliers) 
         self.supplier_total_rewards = np.zeros(num_suppliers) 
         
-        # dimentions set karna
+        # Context dimensions set karna
         self.context_dim = config.OUTPUT_DIM if hasattr(config, 'OUTPUT_DIM') else 128
         self.context_weights = np.random.normal(0, 0.1, (num_suppliers, self.context_dim))
         
         # Recent performance tracking
         self.recent_performance = defaultdict(lambda: deque(maxlen=10))
         
+        # FIXED: Last context ko properly track karna
+        self.last_context = None
+        self.last_selected_suppliers = None
+        
         self.strategy = 'contextual_ucb'
         
     def select_suppliers(self, context_embeddings, current_demand, num_select=5):
+        # FIXED: Context ko store karna for later use
+        if torch.is_tensor(context_embeddings):
+            self.last_context = context_embeddings.detach().cpu().numpy()
+        else:
+            self.last_context = np.array(context_embeddings)
         
         if self.strategy == 'epsilon_greedy':
-            return self._epsilon_greedy_selection(context_embeddings, num_select)
+            selected, probs = self._epsilon_greedy_selection(context_embeddings, num_select)
         elif self.strategy == 'ucb':
-            return self._ucb_selection(context_embeddings, num_select)
+            selected, probs = self._ucb_selection(context_embeddings, num_select)
         elif self.strategy == 'contextual_ucb':
-            return self._contextual_ucb_selection(context_embeddings, current_demand, num_select)
+            selected, probs = self._contextual_ucb_selection(context_embeddings, current_demand, num_select)
         else:
-            return self._random_selection(num_select)
+            selected, probs = self._random_selection(num_select)
+        
+        # FIXED: Selected suppliers ko bhi store karna
+        self.last_selected_suppliers = selected
+        return selected, probs
     
     def _epsilon_greedy_selection(self, context_embeddings, num_select):
         selected_suppliers = []
         selection_probs = np.zeros(self.num_suppliers)
+        
+        # Convert context if needed
+        if torch.is_tensor(context_embeddings):
+            context_array = context_embeddings.detach().cpu().numpy()
+        else:
+            context_array = np.array(context_embeddings)
         
         for _ in range(num_select):
             if random.random() < self.epsilon:
@@ -49,20 +74,33 @@ class SupplierBanditAgent:
                 if available:
                     supplier = random.choice(available)
             else:
-                # Exploit: best known supplier
+                # Exploit: context-aware best supplier
                 available_rewards = np.copy(self.supplier_rewards)
-                for selected in selected_suppliers:
-                    available_rewards[selected] = -np.inf
+                
+                # Add context reward to base reward
+                for i in range(self.num_suppliers):
+                    if i not in selected_suppliers and i < len(context_array):
+                        context_reward = np.dot(self.context_weights[i], context_array[i])
+                        available_rewards[i] += 0.3 * context_reward
+                    elif i in selected_suppliers:
+                        available_rewards[i] = -np.inf
+                
                 supplier = np.argmax(available_rewards)
             
             selected_suppliers.append(supplier)
             selection_probs[supplier] = 1.0
         
-        return selected_suppliers, selection_probs / selection_probs.sum()
+        return selected_suppliers, selection_probs / max(selection_probs.sum(), 1e-8)
     
     def _ucb_selection(self, context_embeddings, num_select):
         selected_suppliers = []
         selection_probs = np.zeros(self.num_suppliers)
+        
+        # Convert context if needed
+        if torch.is_tensor(context_embeddings):
+            context_array = context_embeddings.detach().cpu().numpy()
+        else:
+            context_array = np.array(context_embeddings)
         
         total_selections = np.sum(self.supplier_counts) + 1
         
@@ -78,13 +116,20 @@ class SupplierBanditAgent:
                     ucb_values[i] = np.inf
                 else:
                     confidence = self.ucb_c * np.sqrt(np.log(total_selections) / self.supplier_counts[i])
-                    ucb_values[i] = self.supplier_rewards[i] + confidence
+                    base_reward = self.supplier_rewards[i]
+                    
+                    # FIXED: Context reward properly add karna
+                    context_reward = 0
+                    if i < len(context_array):
+                        context_reward = np.dot(self.context_weights[i], context_array[i])
+                    
+                    ucb_values[i] = base_reward + 0.3 * context_reward + confidence
             
             supplier = np.argmax(ucb_values)
             selected_suppliers.append(supplier)
             selection_probs[supplier] = 1.0
         
-        return selected_suppliers, selection_probs / selection_probs.sum()
+        return selected_suppliers, selection_probs / max(selection_probs.sum(), 1e-8)
     
     def _contextual_ucb_selection(self, context_embeddings, current_demand, num_select):
         selected_suppliers = []
@@ -103,10 +148,13 @@ class SupplierBanditAgent:
                     contextual_ucb_values[i] = -np.inf
                     continue
                 
+                # Context reward calculate karna
+                context_reward = 0
                 if len(context_embeddings.shape) > 1 and i < context_embeddings.shape[0]:
                     context_reward = np.dot(self.context_weights[i], context_embeddings[i])
-                else:
-                    context_reward = 0
+                elif len(context_embeddings.shape) == 1:
+                    # If single context vector, use it for all suppliers
+                    context_reward = np.dot(self.context_weights[i], context_embeddings)
                 
                 demand_factor = min(1.0, current_demand / 1000.0)  # Normalize demand
                 
@@ -126,17 +174,18 @@ class SupplierBanditAgent:
             selected_suppliers.append(supplier)
             selection_probs[supplier] = 1.0
         
-        return selected_suppliers, selection_probs / selection_probs.sum()
+        return selected_suppliers, selection_probs / max(selection_probs.sum(), 1e-8)
     
     def _random_selection(self, num_select):
-        selected_suppliers = random.sample(range(self.num_suppliers), num_select)
+        selected_suppliers = random.sample(range(self.num_suppliers), min(num_select, self.num_suppliers))
         selection_probs = np.zeros(self.num_suppliers)
         for supplier in selected_suppliers:
-            selection_probs[supplier] = 1.0 / num_select
+            selection_probs[supplier] = 1.0 / len(selected_suppliers)
         return selected_suppliers, selection_probs
     
     def update_rewards(self, selected_suppliers, rewards):
-        for supplier, reward in zip(selected_suppliers, rewards):
+        """FIXED: Proper context usage in reward updates"""
+        for i, (supplier, reward) in enumerate(zip(selected_suppliers, rewards)):
             # Update counts
             self.supplier_counts[supplier] += 1
             
@@ -150,11 +199,57 @@ class SupplierBanditAgent:
             # Update recent performance
             self.recent_performance[supplier].append(reward)
             
-            # Update context weights based on reward
-            if hasattr(self, 'last_context') and self.last_context is not None:
-                if supplier < len(self.context_weights):
-                    # Simple gradient update
-                    self.context_weights[supplier] += 0.01 * reward * self.last_context[supplier]
+            # FIXED: Context weights ko properly update karna
+            if self.last_context is not None:
+                # Get context for this specific supplier
+                if len(self.last_context.shape) > 1:
+                    # Multiple contexts - use supplier-specific context
+                    if supplier < self.last_context.shape[0]:
+                        supplier_context = self.last_context[supplier]
+                    else:
+                        # Use mean context if supplier index out of bounds
+                        supplier_context = np.mean(self.last_context, axis=0)
+                else:
+                    # Single context vector - use for all
+                    supplier_context = self.last_context
+                
+                # Ensure context dimension matches
+                if len(supplier_context) == self.context_weights.shape[1]:
+                    # Gradient-based update with reward signal
+                    reward_error = reward - 0.5  # Center around 0
+                    learning_rate = 0.01
+                    
+                    # Update context weights
+                    self.context_weights[supplier] += learning_rate * reward_error * supplier_context
+                    
+                    # Add L2 regularization to prevent overfitting
+                    self.context_weights[supplier] *= 0.999
+    
+    def get_context_insights(self):
+        """New method to understand what contexts are being learned"""
+        insights = {}
+        
+        # Top performing suppliers
+        top_suppliers = np.argsort(self.supplier_rewards)[-10:][::-1]
+        
+        insights['top_suppliers'] = []
+        for supplier in top_suppliers:
+            if self.supplier_counts[supplier] > 0:
+                insights['top_suppliers'].append({
+                    'supplier_id': f'SUP_{supplier:03d}',
+                    'avg_reward': float(self.supplier_rewards[supplier]),
+                    'count': int(self.supplier_counts[supplier]),
+                    'context_weight_norm': float(np.linalg.norm(self.context_weights[supplier]))
+                })
+        
+        # Context weight statistics
+        insights['context_stats'] = {
+            'mean_weight_norm': float(np.mean([np.linalg.norm(w) for w in self.context_weights])),
+            'std_weight_norm': float(np.std([np.linalg.norm(w) for w in self.context_weights])),
+            'context_dimension': int(self.context_dim)
+        }
+        
+        return insights
     
     def calculate_supplier_reward(self, supplier_data):
         # Carbon efficiency (primary factor)
@@ -195,7 +290,8 @@ class SupplierBanditAgent:
                 'avg_reward': avg_reward,
                 'selection_count': int(self.supplier_counts[i]),
                 'total_reward': self.supplier_total_rewards[i],
-                'recent_performance': list(self.recent_performance[i]) if i in self.recent_performance else []
+                'recent_performance': list(self.recent_performance[i]) if i in self.recent_performance else [],
+                'context_weight_norm': float(np.linalg.norm(self.context_weights[i]))
             })
         rankings.sort(key=lambda x: x['avg_reward'], reverse=True)
         return rankings
@@ -223,7 +319,9 @@ class SupplierBanditAgent:
             'supplier_total_rewards': self.supplier_total_rewards,
             'context_weights': self.context_weights,
             'epsilon': self.epsilon,
-            'recent_performance': dict(self.recent_performance)
+            'recent_performance': dict(self.recent_performance),
+            'last_context': self.last_context,
+            'last_selected_suppliers': self.last_selected_suppliers
         }
         torch.save(state, filepath)
     
@@ -235,6 +333,8 @@ class SupplierBanditAgent:
         self.context_weights = state['context_weights']
         self.epsilon = state['epsilon']
         self.recent_performance = defaultdict(lambda: deque(maxlen=10), state['recent_performance'])
+        self.last_context = state.get('last_context', None)
+        self.last_selected_suppliers = state.get('last_selected_suppliers', None)
 
 
 class GNNBanditIntegration:
@@ -267,13 +367,13 @@ class GNNBanditIntegration:
             },
             'demand_forecast': demand_forecast,
             'selection_reasoning': self._generate_selection_reasoning(
-                selected_suppliers, node_embeddings, gnn_outputs
+                selected_suppliers
             )
         }
         
         return results
     
-    def _generate_selection_reasoning(self, selected_suppliers, embeddings, gnn_outputs):
+    def _generate_selection_reasoning(self, selected_suppliers):
         reasoning = []
         
         for supplier_idx in selected_suppliers:

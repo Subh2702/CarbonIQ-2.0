@@ -61,7 +61,7 @@ class DemonstrateBandit:
             selection_result = gnn_bandit.dynamic_supplier_selection(
                 graph_data, demand_forecast, num_suppliers=num_suppliers
             )
-
+            
             logger.info("Demand forecast: %d", demand_forecast)
             logger.info("Selected suppliers: %s", selection_result['selected_suppliers'])
             logger.info("Selection probabilities: %s", selection_result['selection_probabilities'][selection_result['selected_suppliers']])
