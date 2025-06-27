@@ -4,12 +4,6 @@ import numpy as np
 from collections import defaultdict, deque
 import random
 
-import torch
-import torch.nn as nn
-import numpy as np
-from collections import defaultdict, deque
-import random
-
 class SupplierBanditAgent:
     def __init__(self, config, num_suppliers=500):
         self.config = config
