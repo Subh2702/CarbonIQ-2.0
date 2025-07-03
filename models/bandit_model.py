@@ -150,7 +150,7 @@ class SupplierBanditAgent:
                     # If single context vector, use it for all suppliers
                     context_reward = np.dot(self.context_weights[i], context_embeddings)
                 
-                demand_factor = min(1.0, current_demand / 1000.0)  # Normalize demand
+                demand_factor = current_demand / 1000.0  # Normalize demand
                 
                 if self.supplier_counts[i] == 0:
                     contextual_ucb_values[i] = np.inf
@@ -396,7 +396,7 @@ class GNNBanditIntegration:
         
         for cycle in range(num_cycles):
             # Vary demand over time
-            current_demand = base_demand * (1 + 0.2 * np.sin(cycle / 5))
+            current_demand = base_demand * (1 + 0.5 * np.sin(cycle / 5))
             
             # Select suppliers
             selection_result = self.dynamic_supplier_selection(

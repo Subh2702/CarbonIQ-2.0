@@ -4,7 +4,9 @@ from data.data_loader import ImprovedDataLoader
 from models.gnn_model import ImprovedCarbonGNN
 from training.trainer import EnhancedGNNTrainer
 from tests.real_word import TestingForRealWorld
-from training.demonstrate_bandit_integration import DemonstrateBandit
+
+# NEW IMPORTS for single-tier optimization
+from models.single_tier_bandit import SingleTierSupplierOptimizer, SingleTierGNNBanditIntegration
 
 import torch
 from torch_geometric.loader import DataLoader as PyGDataLoader
@@ -80,46 +82,107 @@ def main():
     model = ImprovedCarbonGNN(config)
     logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    # Use input() for interactive, but fallback to default for non-interactive
+    # Train model (if needed)
     try:
-        train_model = input("\n Train the model? (y/n): ").lower().strip() == 'y'
+        train_model = input("\nTrain the model? (y/n): ").lower().strip() == 'y'
     except Exception:
-        train_model = True  # Default to training in non-interactive
+        train_model = True
+    
     if train_model:
-        # EnhancedGNNTrainer expects device as str or torch.device, both are supported
         trainer = EnhancedGNNTrainer(model, config, device=str(device))
         train_loader, val_loader = create_data_loaders(graph_data, config)
         logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
-        logger.info("training started...")
+        logger.info("Training started...")
         try:
             trainer.train(train_loader, val_loader, epochs=config.EPOCHS)
             logger.info("Training ended...")
         except Exception as e:
             logger.error(f"Training failed with error: {e}")
+    
+    # Load trained model
     try:
         checkpoint = torch.load('best_enhanced_gnn_model.pth', map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
         model.to(device)
-    
         graph_data = graph_data.to(str(device))
-        demonstrator = DemonstrateBandit(config)
-        demo_results = demonstrator.demonstrate_bandit_integration(model, graph_data)
-        gnn_bandit = demo_results['gnn_bandit']
-        real_world_tester = TestingForRealWorld(gnn_bandit, graph_data)
-        results = real_world_tester.run_scenarios()
-        logger.info(f"Real-world scenario results: {results}")
-        try:
-            save_bandit = input("\nSave bandit learning state? (y/n): ").lower().strip() == 'y'
-        except Exception:
-            save_bandit = True
-        if save_bandit:
-            try:
-                gnn_bandit.bandit_agent.save_state('trained_bandit_state.pth')
-                logger.info("Bandit state saved to 'trained_bandit_state.pth'")
-            except Exception as e:
-                logger.error(f"Failed to save bandit state: {e}")
+        logger.info("Model loaded successfully")
     except Exception as e:
-        logger.error(f"System initialization failed: {e}")
+        logger.error(f"Failed to load model: {e}")
+        return
+    
+    # NEW: Single-Tier Supplier Optimization
+    logger.info("\n" + "="*60)
+    logger.info("STARTING SINGLE-TIER SUPPLIER OPTIMIZATION")
+    logger.info("="*60)
+    
+    try:
+        # Ask user for optimization mode
+        try:
+            run_optimization = input("\nRun single-tier supplier optimization? (y/n): ").lower().strip() == 'y'
+        except Exception:
+            run_optimization = True
+        
+        if run_optimization:
+            # Initialize single-tier optimizer
+            optimizer = SingleTierSupplierOptimizer(config, num_suppliers=num_nodes)
+            
+            # Create integration
+            single_tier_integration = SingleTierGNNBanditIntegration(model, optimizer)
+            
+            # Ask for number of replacements
+            try:
+                max_replacements = int(input("Max replacements to suggest (default 5): ") or "5")
+            except:
+                max_replacements = 5
+            
+            # Run optimization
+            optimization_results = single_tier_integration.run_single_tier_optimization(
+                graph_data, max_replacements=max_replacements
+            )
+            
+            # Simulate impact of replacements
+            if optimization_results['optimization_results']:
+                logger.info("\nSimulating replacement impact...")
+                impact_results = single_tier_integration.simulate_replacement_impact(
+                    graph_data, optimization_results['optimization_results']
+                )
+                
+                logger.info(f"Original performance: {impact_results['original_performance']:.3f}")
+                logger.info(f"Modified performance: {impact_results['modified_performance']:.3f}")
+                logger.info(f"Performance improvement: {impact_results['improvement']:.3f}")
+                
+                # Ask to save results
+                try:
+                    save_results = input("\nSave optimization results? (y/n): ").lower().strip() == 'y'
+                except Exception:
+                    save_results = True
+                
+                if save_results:
+                    # Save optimization results
+                    results_data = {
+                        'optimization_results': optimization_results,
+                        'impact_results': impact_results,
+                        'config': config.__dict__
+                    }
+                    
+                    torch.save(results_data, 'single_tier_optimization_results.pth')
+                    logger.info("Results saved to 'single_tier_optimization_results.pth'")
+                    
+                    # Save CSV report
+                    summary = optimization_results['summary']
+                    df = pd.DataFrame(summary['replacement_details'])
+                    df.to_csv('optimization_report.csv', index=False)
+                    logger.info("CSV report saved to 'optimization_report.csv'")
+            else:
+                logger.info("No optimization results to save")
+        
+        else:
+            logger.info("Skipping single-tier optimization")
+    
+    except Exception as e:
+        logger.error(f"Single-tier optimization failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()

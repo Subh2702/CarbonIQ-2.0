@@ -28,7 +28,7 @@ class DemonstrateBandit:
     def __init__(self, config):
         self.config = config
 
-    def demonstrate_bandit_integration(self, model, graph_data, demand_forecast=1500, num_suppliers=5, num_cycles=1000, base_demand=1200) -> Dict[str, Any]:
+    def demonstrate_bandit_integration(self, model, graph_data, demand_forecast=1500, num_suppliers=5, num_cycles=1000, base_demand=1000) -> Dict[str, Any]:
         
         logger.info("\n%s", "-" * 60)
         logger.info("DEMONSTRATING GNN-BANDIT INTEGRATION")
@@ -61,7 +61,7 @@ class DemonstrateBandit:
             selection_result = gnn_bandit.dynamic_supplier_selection(
                 graph_data, demand_forecast, num_suppliers=num_suppliers
             )
-            
+            print(selection_result)
             logger.info("Demand forecast: %d", demand_forecast)
             logger.info("Selected suppliers: %s", selection_result['selected_suppliers'])
             logger.info("Selection probabilities: %s", selection_result['selection_probabilities'][selection_result['selected_suppliers']])
@@ -81,7 +81,7 @@ class DemonstrateBandit:
             simulation_results = gnn_bandit.simulate_procurement_cycle(
                 graph_data, num_cycles=num_cycles, base_demand=base_demand
             )
-
+            #print(simulation_results)
             # Analyze learning progression
             logger.info("\nLEARNING PROGRESSION ANALYSIS:")
             logger.info("%s", "-" * 40)
